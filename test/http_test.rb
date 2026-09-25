@@ -7,7 +7,7 @@ require_relative "test_helper"
 
 class HttpTest < Minitest::Test
   def wallet_over(status, body, headers = {})
-    stub = lambda do |_uri, _headers, _body|
+    stub = lambda do |_method, _uri, _headers, _body|
       [status, headers, body]
     end
     Paymos::Wallet.new(Paymos::VaultSecret.pack("vk_live_x", 1, nil),
@@ -15,7 +15,8 @@ class HttpTest < Minitest::Test
   end
 
   def test_returns_parsed_json_on_a_2xx
-    w = wallet_over(200, '{"assets":[{"asset":"USDC@base","symbol":"USDC","chain":"base","decimals":6}]}')
+    # A bare array: what the server has always answered, and what the contract fixtures record.
+    w = wallet_over(200, '[{"asset":"USDC@base","symbol":"USDC","chain":"base","decimals":6}]')
     assets = w.assets
     assert_equal 1, assets.length
     assert_equal "USDC@base", assets[0].asset
@@ -71,7 +72,7 @@ class HttpTest < Minitest::Test
   end
 
   def test_wraps_a_transport_failure_instead_of_leaking_it
-    failing = ->(_uri, _headers, _body) { raise Errno::ECONNRESET, "connection reset" }
+    failing = ->(_method, _uri, _headers, _body) { raise Errno::ECONNRESET, "connection reset" }
     w = Paymos::Wallet.new(Paymos::VaultSecret.pack("vk_live_x", 1, nil),
                            base_url: "https://example.test", transport: failing)
     err = assert_raises(Paymos::PaymosError) { w.assets }
@@ -80,20 +81,21 @@ class HttpTest < Minitest::Test
 
   def test_sends_the_bearer_token_and_the_idempotency_key
     seen = {}
-    stub = lambda do |uri, headers, body|
+    stub = lambda do |_method, uri, headers, body|
       seen[:path] = uri.path
       seen[:headers] = headers
       seen[:body] = body
       case uri.path
       when "/vault/v1/assets"
-        [200, {}, '{"assets":[{"asset":"USDC@base","symbol":"USDC","chain":"base","decimals":6}]}']
+        [200, {}, '[{"asset":"USDC@base","symbol":"USDC","chain":"base","decimals":6}]']
       when "/vault/v1/quote/withdraw"
         # A deliberately wrong asset: the echo check fails AFTER the request was seen.
         [200, {}, '{"movement_id":"m1","mode":"exact_out",' \
                   '"send":{"amount":"24000000","asset":"OTHER"},' \
                   '"debit":{"amount":"25000000","asset":"USDC@base"},' \
                   '"receive":{"amount":"25000000","min":"25000000","asset":"USDC@base"},' \
-                  '"fees":null,"expires_at":"","sources":1}']
+                  '"fees":{"asset":"USDC@base","platform":"0","network":"0","total":"0"},' \
+                  '"expires_at":"2026-01-01T00:00:00+00:00","sources":1}']
       else
         [404, {}, "{}"]
       end
@@ -101,9 +103,10 @@ class HttpTest < Minitest::Test
     w = Paymos::Wallet.new(Paymos::VaultSecret.pack("vk_live_secret", 1, '{"k":1}'),
                            base_url: "https://example.test", transport: stub)
 
-    assert_raises(Paymos::PaymosError) do
+    err = assert_raises(Paymos::PaymosError) do
       w.withdraw(asset: "USDC@base", amount: "25", to: "0xRecipient", idempotency_key: "abc")
     end
+    assert_match(/not the USDC@base→USDC@base that was approved/, err.message)
     assert_equal "Bearer vk_live_secret", seen[:headers]["authorization"]
     assert_equal "abc", seen[:headers]["idempotency-key"]
   end

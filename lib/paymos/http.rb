@@ -20,9 +20,9 @@ module Paymos
   class Http
     DEFAULT_TIMEOUT = 60
 
-    # +transport+ is the test seam: a callable taking (method, uri, headers, body_string) and
-    # returning [status, headers_hash, body_string]. Production leaves it nil and Net::HTTP
-    # does the work.
+    # +transport+ is the test seam: a callable taking (method, uri, headers, body_string) — method
+    # being "GET" or "POST", body_string nil on a GET — and returning
+    # [status, headers_hash, body_string]. Production leaves it nil and Net::HTTP does the work.
     def initialize(base_url, api_key, timeout: DEFAULT_TIMEOUT, transport: nil)
       @base_url = base_url.sub(%r{/+\z}, "")
       @api_key = api_key
@@ -34,24 +34,24 @@ module Paymos
       uri = URI.join(@base_url + "/", path.sub(%r{\A/}, ""))
       query = params.reject { |_, v| v.nil? }
       uri.query = URI.encode_www_form(query) unless query.empty?
-      request(Net::HTTP::Get, uri, {}, nil)
+      request("GET", uri, {}, nil)
     end
 
     def post(path, body_hash, extra_headers = {})
       uri = URI.join(@base_url + "/", path.sub(%r{\A/}, ""))
       headers = { "content-type" => "application/json" }.merge(extra_headers)
-      request(Net::HTTP::Post, uri, headers, JSON.generate(body_hash))
+      request("POST", uri, headers, JSON.generate(body_hash))
     end
 
     private
 
-    def request(_method, uri, headers, body)
+    def request(method, uri, headers, body)
       headers = { "authorization" => "Bearer #{@api_key}" }.merge(headers)
 
       status, resp_headers, text =
         if @transport
           begin
-            @transport.call(uri, headers, body)
+            @transport.call(method, uri, headers, body)
           rescue PaymosError
             raise
           rescue StandardError => e
@@ -62,7 +62,7 @@ module Paymos
           http.use_ssl = uri.scheme == "https"
           http.open_timeout = @timeout
           http.read_timeout = @timeout
-          req = (body ? Net::HTTP::Post : Net::HTTP::Get).new(uri)
+          req = (method == "POST" ? Net::HTTP::Post : Net::HTTP::Get).new(uri)
           headers.each { |k, v| req[k] = v }
           req.body = body if body
           begin
@@ -73,15 +73,29 @@ module Paymos
           end
         end
 
-      parsed = begin
-        text.empty? ? nil : JSON.parse(text)
-      rescue JSON::ParserError
-        nil
+      text = text.to_s
+      parsed = nil
+      json = false
+      unless text.strip.empty?
+        begin
+          parsed = JSON.parse(text)
+          json = true
+        rescue JSON::ParserError
+          # not JSON: json stays false and the branches below say what answered instead
+        end
       end
 
-      return parsed if status >= 200 && status < 300
+      if status >= 200 && status < 300
+        # Every vault endpoint answers JSON. A 2xx that is not JSON is somebody else answering —
+        # a proxy, or the public site served where the API was expected — and handing nil to the
+        # caller would turn it into a NoMethodError three frames later.
+        return parsed if json
 
-      raise raise_for(status, parsed, text, resp_headers["retry-after"])
+        raise PaymosError.new("expected JSON from #{uri.path}, got #{describe(text)} " \
+                              "(status #{status}) — is the base URL the vault API?", status)
+      end
+
+      raise raise_for(status, parsed, text, (resp_headers || {})["retry-after"])
     end
 
     def message_of(parsed, status, text)
@@ -92,7 +106,22 @@ module Paymos
         end
       end
       trimmed = text.strip
-      trimmed.empty? ? "request failed with status #{status}" : trimmed
+      return "request failed with status #{status}" if trimmed.empty?
+      # An HTML error page is not a message: say what answered instead of pasting the page.
+      return "request failed with status #{status}: got #{describe(trimmed)}, not the vault API" if html?(trimmed)
+
+      trimmed
+    end
+
+    def html?(text)
+      text.lstrip.match?(/\A<(!doctype|html|head|body|\?xml)/i)
+    end
+
+    def describe(text)
+      return "an empty body" if text.strip.empty?
+      return "an HTML page" if html?(text)
+
+      "a non-JSON body"
     end
 
     # Map a 400's message to a type. First match wins, in this exact order.

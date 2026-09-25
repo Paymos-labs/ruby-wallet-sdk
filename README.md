@@ -86,8 +86,9 @@ either direction. `Paymos::Amounts.parse_units` / `.format_units` convert betwee
 
 **Moving money.** `swap` and `withdraw` (full key only) create a real movement and drive the
 2-of-2 co-sign. Before any signature the SDK re-checks that the server's quote echoes exactly
-the assets and amount you approved — a decimals bug, contract drift, or a lying server raises
-and **signs nothing**.
+the assets and amount you approved — a decimals bug, contract drift, or a server that changes those
+numbers raises and **signs nothing**. The echo covers assets and amounts, not where the route sends
+the funds (see [Security](#security)).
 
 ```ruby
 mv = w.swap(send: "USDC@base", receive: "ETH@arb", amount: "100", min_receive: "0.03")
@@ -146,9 +147,14 @@ read key can never sign.
 - A leaked **API key alone cannot move funds** — no share, no signature (and the key can be
   revoked).
 - A leaked **share alone cannot move funds** — no server co-sign.
-- Both are required, on purpose. The SDK additionally verifies every message it co-signs, and
-  that the server's quote matches exactly what you approved — so a compromised server can't
-  redirect funds or inflate an amount past your caps.
+- Both are required, on purpose. Before co-signing, the SDK checks that the quote echoes the
+  assets and amount you approved, and that every message it signs is a single transfer from your
+  vault, of the send asset, moving in total no more than the approved debit.
+- What it does **not** check: the recipient. The route's deposit address is chosen by the server
+  and is not verified by the SDK. And for `exact_out` the approved debit is itself computed by the
+  server — pass `max_debit` to put your own ceiling on it; for unattended payouts, always do.
+- The token check binds to the fingerprint the server publishes in `/assets`, unless you pin it
+  (`pinned_fingerprints`, below).
 
 Treat a full `vs_live_…` secret like a private key, and back up the share — losing it means
 losing your ability to co-sign.
@@ -187,9 +193,18 @@ your half of the signature exists.
 ### Does it blind-sign whatever the server asks for?
 
 No, and this is the part worth reading twice. The server discloses the exact message it wants
-signed; the SDK recomputes the digest itself and refuses unless that message belongs to your vault,
-moves no more than the debit you approved, and matches the request you made. A server asking for
-anything else gets a refusal, not a signature.
+signed; the SDK recomputes the digest itself and refuses unless the package binds to that message,
+the message is a single transfer from your vault, and the transfers together move no more than the
+approved debit. Two limits: the recipient is chosen by the server and is not checked, and for
+`exact_out` the approved debit is server-computed unless you cap it with `max_debit` — which you
+should for unattended payouts.
+
+Each transfer is also bound to its token: the token id must hash to the fingerprint `/assets`
+publishes for the send asset. That fingerprint comes from the same server, so the check catches a
+server bug or a compromised signing path, not a server compromised end to end. For a trust anchor
+that does not depend on the server, pin the fingerprints yourself:
+`Paymos::Wallet.new(secret, pinned_fingerprints: { "USDC@base" => "<sha256 hex>" })` (a list is
+accepted too). A pinned asset is checked against your values only.
 
 ### Which networks and assets are supported?
 

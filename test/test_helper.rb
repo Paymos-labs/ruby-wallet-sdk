@@ -8,7 +8,10 @@ require "paymos"
 unless ENV["PAYMOS_NATIVE_LIB"] && !ENV["PAYMOS_NATIVE_LIB"].empty?
   dir = File.expand_path("..", __dir__)
   2.times { dir = File.dirname(dir) } # test/ → sdk/ruby → repo root
-  lib = File.join(dir, "mpc", "wallet-mpc", "target", "release",
-                  Gem.win_platform? ? "wallet_mpc.dll" : "libwallet_mpc.so")
+  name = if Gem.win_platform? then "wallet_mpc.dll"
+         elsif RUBY_PLATFORM.include?("darwin") then "libwallet_mpc.dylib"
+         else "libwallet_mpc.so"
+         end
+  lib = File.join(dir, "mpc", "wallet-mpc", "target", "release", name)
   ENV["PAYMOS_NATIVE_LIB"] = lib if File.exist?(lib)
 end
