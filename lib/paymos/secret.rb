@@ -51,9 +51,23 @@ module Paymos
 
     # Never renders the share, and masks the key: a stray log line must not leak either.
     def to_s
-      mask = @api_key.empty? ? "…" : "#{@api_key[0, 8]}…"
-      "VaultSecret(apiKey=#{mask}, vaultId=#{@vault_id}, hasShare=#{has_share?})"
+      "VaultSecret(apiKey=#{VaultSecret.mask(@api_key)}, vaultId=#{@vault_id}, hasShare=#{has_share?})"
     end
     alias inspect to_s
+
+    # The same masked fields for JSON — and for ActiveSupport, whose Object#as_json would
+    # otherwise serialize every instance variable, the key and the share included.
+    def as_json(*)
+      { "apiKey" => VaultSecret.mask(@api_key), "vaultId" => @vault_id, "hasShare" => has_share? }
+    end
+
+    def to_json(*args)
+      as_json.to_json(*args)
+    end
+
+    # Only the non-secret vk_live_ prefix of a key.
+    def self.mask(key)
+      key.to_s.empty? ? "…" : "#{key[0, 8]}…"
+    end
   end
 end

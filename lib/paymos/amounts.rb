@@ -12,6 +12,11 @@ module Paymos
     module_function
 
     # "1.5", 6 → "1500000". Raises on anything that is not a non-negative decimal.
+    #
+    # For comparing a human figure with a raw amount from a response — never for building the
+    # amount: of a quote, swap or withdraw, or a min_receive: / max_debit:. Those take the human
+    # string itself and the server scales it: withdraw(amount: "10000", …) — what
+    # parse_units("0.01", 6) returns — pays out 10 000 USDC.
     def parse_units(human, decimals)
       raise PaymosError, "decimals must be >= 0" if decimals.negative?
 
@@ -28,7 +33,8 @@ module Paymos
       raw.empty? ? "0" : raw
     end
 
-    # "1500000", 6 → "1.5". Trailing zeros in the fraction are dropped.
+    # "1500000", 6 → "1.5": a raw amount from a response, as a human decimal. Trailing zeros in the
+    # fraction are dropped.
     def format_units(raw, decimals)
       s = raw.to_s
       sign = s.start_with?("-") ? "-" : ""

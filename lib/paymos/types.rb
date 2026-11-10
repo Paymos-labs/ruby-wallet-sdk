@@ -3,10 +3,14 @@
 module Paymos
   # The read model, ported field-for-field from the Python SDK.
   #
-  # Every amount is a STRING of raw integer units, never a number. A token with 18 decimals runs
-  # past what a float holds exactly, so a JSON parser that produced numbers here would round
-  # somebody's balance without saying so. Use Amounts.format_units to show one and
-  # Amounts.parse_units to build one.
+  # Every amount IN THESE RESPONSE TYPES is a STRING of raw integer units, never a number. A
+  # token with 18 decimals runs past what a float holds exactly, so a JSON parser that produced
+  # numbers here would round somebody's balance without saying so. Amounts.format_units shows one
+  # as a human decimal; Amounts.parse_units turns a human figure into raw units to COMPARE with one.
+  #
+  # The amounts you PASS to Wallet are the other way round: human decimal strings ("100", "0.5"),
+  # which the server scales. Never pass the output of parse_units there — "10000" meant as 0.01
+  # USDC is read as 10 000 USDC.
   #
   # The server speaks snake_case and the models keep it: no renaming layer to drift.
 

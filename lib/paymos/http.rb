@@ -30,6 +30,20 @@ module Paymos
       @transport = transport
     end
 
+    # Where the transport points, and the key's prefix only — never the key it sends.
+    def inspect
+      "#<Paymos::Http base_url=#{@base_url} api_key=#{VaultSecret.mask(@api_key)}>"
+    end
+    alias to_s inspect
+
+    def as_json(*)
+      { "baseUrl" => @base_url, "apiKey" => VaultSecret.mask(@api_key) }
+    end
+
+    def to_json(*args)
+      as_json.to_json(*args)
+    end
+
     def get(path, params = {})
       uri = URI.join(@base_url + "/", path.sub(%r{\A/}, ""))
       query = params.reject { |_, v| v.nil? }

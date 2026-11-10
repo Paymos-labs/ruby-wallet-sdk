@@ -28,8 +28,11 @@ gem install paymos-wallet
 Requires **Ruby ≥ 3.0**.
 
 The native co-signing core is **not** inside the gem. On first use the SDK downloads the
-pinned, platform-matching build from the `paymos-wallet-core` releases, verifies its SHA-256 against
-the release's checksum, and caches it per user.
+platform-matching build of the core version it is pinned to from the `paymos-wallet-core` releases,
+verifies it, and caches it per user. When this SDK build carries a compiled-in SHA-256 for your
+platform, that hash is the only one accepted — for the download and, re-checked on every load, for
+the cached file. When it carries none, the download is checked against the `.sha256` published in
+the same release, which catches a corrupted download but not a replaced release.
 
 A prebuilt core exists for **Linux x86-64**, **Linux arm64** and **Windows x64**. The SDK also
 recognises macOS on both architectures, but no macOS build is published yet — there is no Mac to
@@ -80,9 +83,16 @@ puts settled.status
 
 ## Core concepts
 
-**Amounts: human in, raw out.** You pass human decimal strings; the server owns each asset's
-decimals and scales them to raw. Responses come back as raw integer strings. Never a float, in
-either direction. `Paymos::Amounts.parse_units` / `.format_units` convert between the two.
+**Amounts: human in, raw out.** Every amount you pass — the `amount:` of `quote_swap`,
+`quote_withdraw`, `swap` and `withdraw`, and `min_receive:` / `max_debit:` — is a human decimal
+string (`"100"`, `"0.5"`); the server owns each asset's decimals and scales it to raw. Every amount
+in a response is a raw integer string (`"10000"` is 0.01 of a 6-decimal USDC). Never a float, in
+either direction. `Paymos::Amounts.format_units` turns a raw response amount into a human one for
+display; `Paymos::Amounts.parse_units` turns a human figure into raw units to **compare** with a
+response amount. It is never for building an argument:
+`wallet.withdraw(asset: "USDC@base", amount: Paymos::Amounts.parse_units("0.01", 6), to: …)` sends
+`"10000"` and pays out **10 000 USDC** — and since the SDK and the server agree on that number, no
+check anywhere can tell it from an intended one.
 
 **Moving money.** `swap` and `withdraw` (full key only) create a real movement and drive the
 2-of-2 co-sign. Before any signature the SDK re-checks that the server's quote echoes exactly
@@ -228,8 +238,11 @@ sign — not the funds.
 
 ### What happens if a transfer is interrupted?
 
-Every money-moving call takes an idempotency key. Repeating a call with the same key returns the
-original operation instead of starting a second one, so a retry after a timeout cannot pay twice.
+Every money-moving call is sent under an idempotency key, and repeating a call with the **same** key
+returns the original operation instead of starting a second one. That holds only if your retry
+carries the same key: pass your own durable one (`idempotency_key:`, e.g. your payout id) and retry
+with it, and a retry after a timeout cannot pay twice. Leave it out and the SDK generates a fresh key
+per call — a retry is then a second payment. An empty key is refused rather than sent.
 
 ## The same wallet, in eight languages
 

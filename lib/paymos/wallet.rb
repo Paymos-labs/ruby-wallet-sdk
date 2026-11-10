@@ -37,6 +37,20 @@ module Paymos
 
     DEFAULT_BASE_URL = "https://wallet.paymos.io"
 
+    # The object class the blind-sign guard parses a disclosed message into. JSON.parse keeps the
+    # LAST of a repeated object key (json >= 2.13 only warns); the verifier on chain re-parses the
+    # signed bytes and rejects a repeated field. A message naming one key twice says two things, so
+    # the second assignment of a key — at any depth, however it was escaped — is a parse error.
+    # (Case is not the issue here: "intents" and "Intents" are two keys to both readers.)
+    class UniqueKeyHash < Hash
+      def []=(key, value)
+        raise JSON::ParserError, "duplicate key #{key.inspect}" if key?(key)
+
+        super
+      end
+    end
+    private_constant :UniqueKeyHash
+
     # +pinned_fingerprints+ is an optional trust anchor for the co-sign guard, independent of the
     # server: { "USDC@base" => "<sha256 hex>" } or { "BTC@btc" => ["<hex>", "<hex>"] }. A pinned
     # label is checked against ONLY its pinned value(s), whatever /assets publishes; an unpinned
@@ -49,6 +63,24 @@ module Paymos
       @pinned = normalize_pins(pinned_fingerprints)
       @catalog = nil
       @asset_cache = nil
+    end
+
+    # What p, pp, irb and an error message show of a wallet: which vault, whether it can sign, the
+    # key's vk_live_ prefix — never the key or the share. Ruby's default inspect would print every
+    # instance variable, the transport's API key among them.
+    def inspect
+      "#<Paymos::Wallet vault_id=#{@secret.vault_id} has_share=#{@secret.has_share?} " \
+        "api_key=#{VaultSecret.mask(@secret.api_key)}>"
+    end
+    alias to_s inspect
+
+    # The same for JSON, ActiveSupport's as_json included.
+    def as_json(*)
+      { "vaultId" => @secret.vault_id, "hasShare" => @secret.has_share?, "apiKey" => VaultSecret.mask(@secret.api_key) }
+    end
+
+    def to_json(*args)
+      as_json.to_json(*args)
     end
 
     # Reads PAYMOS_VAULT_SECRET, the way a deployed process is configured.
@@ -102,6 +134,10 @@ module Paymos
     # ── quotes ───────────────────────────────────────────────────────────────
 
     # A dry preview. Nothing is created and nothing is signed.
+    #
+    # +amount+ is a HUMAN decimal string in the send asset ("100", "0.5"); the server scales it by
+    # the asset's decimals. The quote comes back in raw integer strings. Never pass
+    # Amounts.parse_units output here: "10000" is ten thousand of the asset, not 0.01.
     def quote_swap(send:, receive:, amount:, slippage_bps: 50)
       validate_amount(amount, send)
       decimals_of(receive)
@@ -109,6 +145,9 @@ module Paymos
     end
 
     # A dry preview. Nothing is created and nothing is signed.
+    #
+    # +amount+ is a HUMAN decimal string in +asset+ ("25", "0.01"); the server scales it. The quote
+    # comes back in raw integer strings. Never pass Amounts.parse_units output here.
     def quote_withdraw(asset:, amount:, to:, mode: "exact_out")
       validate_amount(amount, asset)
       quote("/vault/v1/quote/withdraw",
@@ -118,14 +157,21 @@ module Paymos
 
     # ── money ────────────────────────────────────────────────────────────────
 
+    # Swaps +amount+ of +send+ for +receive+, delivered back to this vault: a real movement,
+    # co-signed. Full-key secrets only.
+    #
+    # +amount+, +min_receive+ and +max_debit+ are HUMAN decimal strings ("100", "99.5") that the
+    # server scales by each asset's decimals — never Amounts.parse_units output, which would be read
+    # as that many whole units: swap(..., amount: "10000") swaps ten thousand USDC.
     def swap(send:, receive:, amount:, slippage_bps: 50, min_receive: nil, max_debit: nil,
              idempotency_key: nil)
       require_share("swap")
+      key = idempotency_key_of(idempotency_key)
       send_dec = validate_amount(amount, send)
       recv_dec = decimals_of(receive)
 
       q = quote("/vault/v1/quote/swap", swap_body(send, receive, amount, slippage_bps),
-                dry: false, idempotency_key: idempotency_key || fresh_idempotency_key)
+                dry: false, idempotency_key: key)
 
       if min_receive
         floor = Integer(Amounts.parse_units(min_receive, recv_dec))
@@ -142,13 +188,20 @@ module Paymos
       movement(require_movement_id(q))
     end
 
+    # Pays +amount+ of +asset+ out to +to+: a real movement, co-signed. Full-key secrets only.
+    #
+    # +amount+ and +max_debit+ are HUMAN decimal strings ("25", "0.01") that the server scales by
+    # the asset's decimals — never Amounts.parse_units output. withdraw(amount: "10000", ...), which
+    # is what parse_units("0.01", 6) returns, pays out ten thousand USDC; the SDK and the server
+    # agree on that number, so no check can tell it from an intended one.
     def withdraw(asset:, amount:, to:, mode: "exact_out", max_debit: nil, idempotency_key: nil)
       require_share("withdraw")
+      key = idempotency_key_of(idempotency_key)
       dec = validate_amount(amount, asset)
 
       q = quote("/vault/v1/quote/withdraw",
                 { asset: asset, amount: amount, to: to, mode: mode },
-                dry: false, idempotency_key: idempotency_key || fresh_idempotency_key)
+                dry: false, idempotency_key: key)
 
       # A withdraw is same-asset. For exact_out the approved amount is the guaranteed OUT; for
       # total_in it is the total DEBIT — and the send leg is total minus fees, so pinning send
@@ -360,9 +413,11 @@ module Paymos
           raise PaymosError, "co-sign refused: signing package #{i} does not bind to the disclosed message"
         end
 
-        # (2) structure and own-vault: one transfer, signed from this vault and no other.
+        # (2) structure and own-vault: one transfer, signed from this vault and no other. Read the
+        # way the verifier on chain reads it: a repeated key is refused (UniqueKeyHash), never
+        # resolved to its last value. JSON.parse's max_nesting (100) bounds the depth.
         parsed = begin
-          JSON.parse(message)
+          JSON.parse(message, object_class: UniqueKeyHash)
         rescue JSON::ParserError => e
           raise PaymosError, "co-sign refused: unreadable message for source #{i}: #{e.message}"
         end
@@ -426,6 +481,22 @@ module Paymos
 
       raise PaymosError,
             "co-sign refused: the server did not publish an asset fingerprint for #{label} — update the server"
+    end
+
+    # The key a money call is sent under: the caller's, or a fresh one when they passed nil. An
+    # empty or blank key is refused. It used to go out as an empty header ("" is truthy in Ruby),
+    # which the server reads as no key at all: a retry paid again while the caller believed it was
+    # deduplicated.
+    def idempotency_key_of(key)
+      return fresh_idempotency_key if key.nil?
+
+      if key.to_s.strip.empty?
+        raise PaymosError,
+              "idempotency_key is empty — pass a durable key (a payout or job id) so a retry replays " \
+              "the same movement, or leave it nil for a fresh one per call"
+      end
+
+      key
     end
 
     # uuid-v4-shaped hex without the dashes — the same shape the other SDKs generate.

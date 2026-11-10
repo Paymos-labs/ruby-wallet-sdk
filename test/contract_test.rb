@@ -739,6 +739,54 @@ class ContractTest < Minitest::Test
     end
   end
 
+  # The recorded sign/begin shape, disclosing +message+ verbatim and binding its package to it —
+  # for bytes JSON.generate would never write.
+  def raw_begin(message)
+    body = response_of("sign_begin")[1]
+    disc = body["messages"][0]
+    nonce = "00" * 32
+    body.merge("messages" => [disc.merge("message" => message, "nonce" => nonce)],
+               "signing_packages" => [body["signing_packages"][0].merge(
+                 "message" => Paymos::Digest.payload_digest_hex(message, [nonce].pack("H*"), disc["recipient"])
+               )])
+  end
+
+  def refused_with(message, pattern)
+    w, server = wallet(swap_routes(raw_begin(message), response_of("sign_aggregate")), share: full_share)
+    with_native_stubbed do |calls|
+      err = assert_raises(Paymos::PaymosError) { w.swap(send: "USDC@base", receive: "USDT@base", amount: "5") }
+      assert_match(pattern, err.message)
+      assert_equal 0, calls[:sign]
+    end
+    assert_empty server.sent("POST", "/vault/v1/movements/mv_3/sign/aggregate")
+  end
+
+  # The verifier on chain re-parses the signed bytes and rejects a repeated key; JSON.parse keeps
+  # the last. Read last-wins, each of these is one transfer inside the debit — it is refused.
+  def test_the_guard_refuses_a_message_that_repeats_a_key
+    real = '{"intent":"transfer","tokens":{"usdc-base":"5000000000"}}'
+    decoy = '{"intent":"transfer","tokens":{"usdc-base":"5000000"}}'
+    [
+      %({"signer_id":"#{SIGNER}","intents":[#{real}],"intents":[#{decoy}]}),
+      %({"signer_id":"#{SIGNER}","intents":[#{real}],"\\u0069ntents":[#{decoy}]}),
+      %({"signer_id":"someone.else","intents":[#{decoy}],"signer_id":"#{SIGNER}"}),
+      %({"signer_id":"#{SIGNER}","intents":[{"intent":"transfer","tokens":{"usdc-base":"5000000000","usdc-base":"5000000"}}]})
+    ].each do |message|
+      # Read last-wins: what json < 3 does by default (json 3 refuses a repeat unless allowed).
+      assert_equal 1, JSON.parse(message, allow_duplicate_key: true)["intents"].length
+      refused_with(message, /co-sign refused: unreadable message for source 0: duplicate key/)
+    end
+    # "Intents" is another key to JSON.parse and to the verifier alike: the guard reads "intents".
+    refused_with(%({"signer_id":"#{SIGNER}","intents":[#{real}],"Intents":[#{decoy}]}), /above the approved debit/)
+  end
+
+  # JSON.parse stops at max_nesting (100): a deep message is the guard's refusal, typed.
+  def test_the_guard_refuses_a_message_nested_too_deep
+    intents = '"intents":[{"intent":"transfer","tokens":{"usdc-base":"5000000"}}]'
+    refused_with(%({"signer_id":"#{SIGNER}",#{intents},"memo":#{'[' * 100_000}#{']' * 100_000}}),
+                 /co-sign refused: unreadable message for source 0: nesting of \d+ is too deep/)
+  end
+
   def test_the_guard_refuses_an_inflated_transfer
     w, = wallet(swap_routes(consistent_begin(amount: "5000001"), response_of("sign_aggregate")),
                 share: full_share)
